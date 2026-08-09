@@ -15,7 +15,10 @@ export default function AdminPage() {
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
 
-  // 1. Verificar sesión al entrar. Si no hay sesión, fuera de aquí.
+  // Estado del recalculo de dimensiones
+  const [fixing, setFixing] = useState(false);
+  const [fixProgress, setFixProgress] = useState({ done: 0, total: 0 });
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session) {
@@ -30,7 +33,7 @@ export default function AdminPage() {
   const loadPosts = useCallback(async () => {
     const { data } = await supabase
       .from("posts")
-      .select("id, image_url, caption, created_at")
+      .select("id, image_url, caption, width, height, created_at")
       .order("created_at", { ascending: false });
     setPosts(data || []);
   }, []);
@@ -52,6 +55,46 @@ export default function AdminPage() {
       img.onload = () => resolve({ width: img.width, height: img.height });
       img.src = URL.createObjectURL(f);
     });
+  }
+
+  // Lee el tamaño REAL de una imagen ya publicada (por URL), cargándola
+  // en el navegador una vez.
+  function getRemoteImageDimensions(url) {
+    return new Promise((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () =>
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = reject;
+      img.src = url;
+    });
+  }
+
+  // Recorre todas las fotos y corrige width/height con el valor real.
+  // Sirve para las que se subieron manualmente por Storage (sin pasar
+  // por este formulario) y quedaron con un tamaño "inventado".
+  async function handleFixDimensions() {
+    setFixing(true);
+    setFixProgress({ done: 0, total: posts.length });
+
+    for (let i = 0; i < posts.length; i++) {
+      const post = posts[i];
+      try {
+        const { width, height } = await getRemoteImageDimensions(
+          post.image_url
+        );
+        await supabase
+          .from("posts")
+          .update({ width, height })
+          .eq("id", post.id);
+      } catch (err) {
+        console.error("No se pudo leer la imagen:", post.image_url, err);
+      }
+      setFixProgress({ done: i + 1, total: posts.length });
+    }
+
+    await loadPosts();
+    setFixing(false);
+    setMessage("Dimensiones actualizadas. Ya podés recargar la galería.");
   }
 
   async function handleUpload(e) {
@@ -132,6 +175,28 @@ export default function AdminPage() {
         </button>
       </div>
 
+      {/* Herramienta: recalcular dimensiones reales */}
+      <div className="border border-accent/40 bg-charcoal p-5 mb-8">
+        <h2 className="text-[11px] uppercase tracking-widest2 text-accent mb-2">
+          Corregir tamaños de fotos
+        </h2>
+        <p className="text-xs text-mute mb-4 leading-relaxed">
+          Usá esto si subiste fotos manualmente desde Supabase Storage (no
+          desde este formulario) y en la galería se ven recortadas. Lee el
+          tamaño real de cada foto y corrige la base de datos. Se puede
+          correr las veces que quieras, no hace daño.
+        </p>
+        <button
+          onClick={handleFixDimensions}
+          disabled={fixing || posts.length === 0}
+          className="w-full border border-accent text-accent py-2 text-sm uppercase tracking-widest2 hover:bg-accent hover:text-ink transition-colors disabled:opacity-50"
+        >
+          {fixing
+            ? `Corrigiendo... ${fixProgress.done}/${fixProgress.total}`
+            : "Recalcular dimensiones reales"}
+        </button>
+      </div>
+
       <form
         onSubmit={handleUpload}
         className="border border-line bg-charcoal p-6 mb-12"
@@ -200,7 +265,7 @@ export default function AdminPage() {
               className="w-14 h-14 object-cover"
             />
             <span className="flex-1 text-xs text-mute truncate">
-              {p.caption || "sin descripción"}
+              {p.caption || "sin descripción"} · {p.width}×{p.height}
             </span>
             <button
               onClick={() => handleDelete(p.id)}
