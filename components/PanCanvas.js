@@ -3,16 +3,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 // ============================================================
-// Tamaño del "período" — el bloque que se repite infinitamente.
-// Ajustá esto si cambia mucho la cantidad de fotos (más fotos =
-// período más grande para que no se vean muy chicas).
+// ▼▼▼ ACÁ SE AJUSTAN LOS DOS PARÁMETROS QUE PEDISTE ▼▼▼
 // ============================================================
-const PERIOD_W = 1700;
-const PERIOD_H = 1300;
-const GAP = 76; // ~2cm a 96dpi
 
-// PRNG determinístico simple (mismo layout en cada carga, no
-// cambia el mosaico cada vez que refrescás la página).
+// Margen entre fotos, en píxeles. 1cm ≈ 37.8px a 96dpi.
+// 0.5cm ≈ 19px. Subí o bajá este número para más o menos separación.
+const GAP = 19;
+
+// Cantidad de columnas del mosaico (como en Pinterest/masonry).
+// Más columnas = fotos más chicas y más "densas".
+const COLS = 5;
+
+// Ancho de cada columna en píxeles (el alto de cada foto sale solo,
+// de su proporción real — nunca se recorta ninguna imagen).
+const COL_WIDTH = 340;
+
+// ============================================================
+
+// PRNG determinístico simple (mismo orden de fotos en cada carga).
 function mulberry32(seed) {
   return function () {
     seed |= 0;
@@ -23,42 +31,40 @@ function mulberry32(seed) {
   };
 }
 
-// Particiona recursivamente un rectángulo en N piezas asimétricas
-// que en conjunto llenan el rectángulo exactamente (sin huecos,
-// sin superposición) — por eso el tile repite sin costuras.
-function bspLayout(items, rect, rng, gap) {
-  if (items.length === 1) {
-    return [{ item: items[0], ...rect }];
+// Masonry real por columnas: cada foto conserva su proporción
+// original (nunca se recorta). El "período" resultante es siempre
+// un rectángulo exacto (PERIOD_W × PERIOD_H calculado), por eso
+// sigue repitiendo sin costuras al hacer wraparound.
+function columnMasonryLayout(items, cols, colWidth, gap, rng) {
+  // Orden aleatorio (pero determinístico) para que el mosaico no
+  // quede siempre con las mismas fotos arriba.
+  const shuffled = [...items].sort(() => rng() - 0.5);
+
+  const colHeights = new Array(cols).fill(0);
+  const tiles = [];
+
+  for (const item of shuffled) {
+    // La foto va a la columna más corta hasta ahora (masonry clásico).
+    let col = 0;
+    for (let c = 1; c < cols; c++) {
+      if (colHeights[c] < colHeights[col]) col = c;
+    }
+
+    const aspect =
+      item.width && item.height ? item.width / item.height : 0.8; // fallback 4:5
+    const h = colWidth / aspect;
+    const x = gap / 2 + col * (colWidth + gap);
+    const y = gap / 2 + colHeights[col];
+
+    tiles.push({ item, x, y, w: colWidth, h });
+
+    colHeights[col] += h + gap;
   }
 
-  const mid = Math.max(1, Math.floor(items.length / 2) + (rng() > 0.5 ? 1 : 0) - (items.length === 2 ? 0 : 0));
-  const splitAt = Math.min(items.length - 1, Math.max(1, mid));
-  const groupA = items.slice(0, splitAt);
-  const groupB = items.slice(splitAt);
+  const periodW = cols * (colWidth + gap);
+  const periodH = Math.max(...colHeights) + gap / 2;
 
-  const horizontal = rect.w >= rect.h;
-  const ratioBase = groupA.length / items.length;
-  const ratio = Math.min(0.7, Math.max(0.3, ratioBase + (rng() - 0.5) * 0.2));
-
-  if (horizontal) {
-    const wA = rect.w * ratio - gap / 2;
-    const wB = rect.w - wA - gap;
-    const rectA = { x: rect.x, y: rect.y, w: wA, h: rect.h };
-    const rectB = { x: rect.x + wA + gap, y: rect.y, w: wB, h: rect.h };
-    return [
-      ...bspLayout(groupA, rectA, rng, gap),
-      ...bspLayout(groupB, rectB, rng, gap),
-    ];
-  } else {
-    const hA = rect.h * ratio - gap / 2;
-    const hB = rect.h - hA - gap;
-    const rectA = { x: rect.x, y: rect.y, w: rect.w, h: hA };
-    const rectB = { x: rect.x, y: rect.y + hA + gap, w: rect.w, h: hB };
-    return [
-      ...bspLayout(groupA, rectA, rng, gap),
-      ...bspLayout(groupB, rectB, rng, gap),
-    ];
-  }
+  return { tiles, periodW, periodH };
 }
 
 export default function PanCanvas({ posts }) {
@@ -75,16 +81,10 @@ export default function PanCanvas({ posts }) {
   const [active, setActive] = useState(null);
 
   // Layout determinístico: se calcula una sola vez por set de fotos.
-  const tiles = useMemo(() => {
-    if (!posts || posts.length === 0) return [];
+  const { tiles, periodW, periodH } = useMemo(() => {
+    if (!posts || posts.length === 0) return { tiles: [], periodW: 1, periodH: 1 };
     const rng = mulberry32(posts.length * 7919);
-    const rootRect = {
-      x: GAP / 2,
-      y: GAP / 2,
-      w: PERIOD_W - GAP,
-      h: PERIOD_H - GAP,
-    };
-    return bspLayout(posts, rootRect, rng, GAP);
+    return columnMasonryLayout(posts, COLS, COL_WIDTH, GAP, rng);
   }, [posts]);
 
   // Medir viewport y recalcular en resize.
@@ -97,8 +97,8 @@ export default function PanCanvas({ posts }) {
     return () => window.removeEventListener("resize", measure);
   }, []);
 
-  const copiesX = Math.ceil(viewport.w / PERIOD_W) + 2;
-  const copiesY = Math.ceil(viewport.h / PERIOD_H) + 2;
+  const copiesX = Math.ceil(viewport.w / periodW) + 2;
+  const copiesY = Math.ceil(viewport.h / periodH) + 2;
 
   // Loop de render: aplica transform directo al DOM (sin pasar por
   // React state) para que el pan sea fluido a 60fps.
@@ -114,8 +114,8 @@ export default function PanCanvas({ posts }) {
         if (Math.abs(velocity.current.y) < 0.02) velocity.current.y = 0;
       }
 
-      const wrappedX = ((pan.current.x % PERIOD_W) + PERIOD_W) % PERIOD_W;
-      const wrappedY = ((pan.current.y % PERIOD_H) + PERIOD_H) % PERIOD_H;
+      const wrappedX = ((pan.current.x % periodW) + periodW) % periodW;
+      const wrappedY = ((pan.current.y % periodH) + periodH) % periodH;
 
       if (worldRef.current) {
         worldRef.current.style.transform = `translate3d(${-wrappedX}px, ${-wrappedY}px, 0)`;
@@ -125,7 +125,7 @@ export default function PanCanvas({ posts }) {
     }
     rafId.current = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(rafId.current);
-  }, []);
+  }, [periodW, periodH]);
 
   // Wheel: rueda del mouse pandea el mundo.
   useEffect(() => {
@@ -173,8 +173,8 @@ export default function PanCanvas({ posts }) {
     setActive(post);
   }
 
-  const copyOffsetsX = Array.from({ length: copiesX }, (_, i) => (i - 1) * PERIOD_W);
-  const copyOffsetsY = Array.from({ length: copiesY }, (_, i) => (i - 1) * PERIOD_H);
+  const copyOffsetsX = Array.from({ length: copiesX }, (_, i) => (i - 1) * periodW);
+  const copyOffsetsY = Array.from({ length: copiesY }, (_, i) => (i - 1) * periodH);
 
   if (!tiles.length) {
     return (
@@ -201,8 +201,8 @@ export default function PanCanvas({ posts }) {
               className="absolute top-0 left-0"
               style={{
                 transform: `translate3d(${offX}px, ${offY}px, 0)`,
-                width: PERIOD_W,
-                height: PERIOD_H,
+                width: periodW,
+                height: periodH,
               }}
             >
               {tiles.map(({ item, x, y, w, h }) => (
