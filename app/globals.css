@@ -23,17 +23,34 @@ body {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-.masonry-grid {
-  display: flex;
-  margin-left: -10px;
-  width: auto;
+/* ============================================================
+   MASONRY estilo cosmos.so: columnas CSS nativas, gap mínimo,
+   cada imagen cae en el siguiente hueco libre de su columna.
+   ============================================================ */
+.masonry-columns {
+  column-count: 2;
+  column-gap: 3px;
 }
 
-.masonry-grid_column {
-  padding-left: 10px;
-  background-clip: padding-box;
+@media (min-width: 640px) {
+  .masonry-columns {
+    column-count: 3;
+  }
 }
 
-.masonry-grid_column > * {
-  margin-bottom: 10px;
+@media (min-width: 900px) {
+  .masonry-columns {
+    column-count: 4;
+  }
+}
+
+@media (min-width: 1400px) {
+  .masonry-columns {
+    column-count: 5;
+  }
+}
+
+.masonry-item {
+  break-inside: avoid;
+  margin-bottom: 3px;
 }
