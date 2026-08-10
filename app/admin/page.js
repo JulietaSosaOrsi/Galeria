@@ -103,7 +103,8 @@ export default function AdminPage() {
         if (insertError) throw insertError;
       } catch (err) {
         console.error("Error subiendo", file.name, err);
-        setBulkErrors((prev) => [...prev, file.name]);
+        const reason = err?.message || err?.error_description || String(err);
+        setBulkErrors((prev) => [...prev, `${file.name}: ${reason}`]);
       }
       setBulkProgress({ done: i + 1, total: files.length });
     }
