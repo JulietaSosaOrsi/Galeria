@@ -9,13 +9,15 @@ export default function AdminPage() {
   const [checking, setChecking] = useState(true);
   const [user, setUser] = useState(null);
   const [posts, setPosts] = useState([]);
-  const [file, setFile] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const [caption, setCaption] = useState("");
-  const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState("");
 
-  // Estado del recalculo de dimensiones
+  // Subida masiva (varias fotos a la vez)
+  const [files, setFiles] = useState([]);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ done: 0, total: 0 });
+  const [bulkErrors, setBulkErrors] = useState([]);
+
+  // Recalcular dimensiones (fotos viejas subidas manualmente)
   const [fixing, setFixing] = useState(false);
   const [fixProgress, setFixProgress] = useState({ done: 0, total: 0 });
 
@@ -42,13 +44,6 @@ export default function AdminPage() {
     if (user) loadPosts();
   }, [user, loadPosts]);
 
-  function handleFileChange(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFile(f);
-    setPreview(URL.createObjectURL(f));
-  }
-
   function getImageDimensions(f) {
     return new Promise((resolve) => {
       const img = new window.Image();
@@ -57,8 +52,6 @@ export default function AdminPage() {
     });
   }
 
-  // Lee el tamaño REAL de una imagen ya publicada (por URL), cargándola
-  // en el navegador una vez.
   function getRemoteImageDimensions(url) {
     return new Promise((resolve, reject) => {
       const img = new window.Image();
@@ -69,12 +62,62 @@ export default function AdminPage() {
     });
   }
 
-  // Recorre todas las fotos y corrige width/height con el valor real.
-  // Sirve para las que se subieron manualmente por Storage (sin pasar
-  // por este formulario) y quedaron con un tamaño "inventado".
+  function handleFilesChange(e) {
+    setFiles(Array.from(e.target.files || []));
+  }
+
+  // Sube TODAS las fotos seleccionadas, una por una, midiendo el
+  // tamaño real de cada una antes de subirla. Funciona igual con
+  // 1 foto que con 400 — no hay ningún límite en el código.
+  async function handleBulkUpload(e) {
+    e.preventDefault();
+    if (!files.length || !user) return;
+
+    setBulkUploading(true);
+    setBulkErrors([]);
+    setBulkProgress({ done: 0, total: files.length });
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { width, height } = await getImageDimensions(file);
+        const ext = file.name.split(".").pop();
+        const path = `${user.id}/${Date.now()}-${i}.${ext}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("gallery")
+          .upload(path, file, { cacheControl: "3600", upsert: false });
+        if (uploadError) throw uploadError;
+
+        const {
+          data: { publicUrl },
+        } = supabase.storage.from("gallery").getPublicUrl(path);
+
+        const { error: insertError } = await supabase.from("posts").insert({
+          user_id: user.id,
+          image_url: publicUrl,
+          caption: null,
+          width,
+          height,
+        });
+        if (insertError) throw insertError;
+      } catch (err) {
+        console.error("Error subiendo", file.name, err);
+        setBulkErrors((prev) => [...prev, file.name]);
+      }
+      setBulkProgress({ done: i + 1, total: files.length });
+    }
+
+    await loadPosts();
+    setBulkUploading(false);
+    setFiles([]);
+    setMessage("Subida masiva terminada.");
+  }
+
   async function handleFixDimensions() {
     setFixing(true);
     setFixProgress({ done: 0, total: posts.length });
+    let fixed = 0;
 
     for (let i = 0; i < posts.length; i++) {
       const post = posts[i];
@@ -82,71 +125,41 @@ export default function AdminPage() {
         const { width, height } = await getRemoteImageDimensions(
           post.image_url
         );
-        await supabase
+        const { data, error } = await supabase
           .from("posts")
           .update({ width, height })
-          .eq("id", post.id);
+          .eq("id", post.id)
+          .select();
+        if (error) throw error;
+        if (data && data.length > 0) fixed++;
       } catch (err) {
-        console.error("No se pudo leer la imagen:", post.image_url, err);
+        console.error("No se pudo actualizar:", post.image_url, err);
       }
       setFixProgress({ done: i + 1, total: posts.length });
     }
 
     await loadPosts();
     setFixing(false);
-    setMessage("Dimensiones actualizadas. Ya podés recargar la galería.");
-  }
-
-  async function handleUpload(e) {
-    e.preventDefault();
-    if (!file || !user) return;
-
-    setUploading(true);
-    setMessage("");
-
-    try {
-      const { width, height } = await getImageDimensions(file);
-
-      const ext = file.name.split(".").pop();
-      const path = `${user.id}/${Date.now()}.${ext}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("gallery")
-        .upload(path, file, { cacheControl: "3600", upsert: false });
-
-      if (uploadError) throw uploadError;
-
-      const {
-        data: { publicUrl },
-      } = supabase.storage.from("gallery").getPublicUrl(path);
-
-      const { error: insertError } = await supabase.from("posts").insert({
-        user_id: user.id,
-        image_url: publicUrl,
-        caption: caption || null,
-        width,
-        height,
-      });
-
-      if (insertError) throw insertError;
-
-      setMessage("Foto publicada.");
-      setFile(null);
-      setPreview(null);
-      setCaption("");
-      loadPosts();
-    } catch (err) {
-      console.error(err);
-      setMessage("Ocurrió un error al subir la foto.");
-    } finally {
-      setUploading(false);
-    }
+    setMessage(
+      fixed === posts.length
+        ? `Listo, se corrigieron ${fixed} fotos.`
+        : `Se corrigieron ${fixed} de ${posts.length}. Las que no cambiaron probablemente no son tuyas (user_id distinto) — mejor borralas y resubilas con "Subir varias fotos".`
+    );
   }
 
   async function handleDelete(postId) {
     const confirmed = window.confirm("¿Borrar esta foto?");
     if (!confirmed) return;
     await supabase.from("posts").delete().eq("id", postId);
+    loadPosts();
+  }
+
+  async function handleDeleteAll() {
+    const confirmed = window.confirm(
+      `¿Borrar las ${posts.length} fotos publicadas? Esto NO se puede deshacer.`
+    );
+    if (!confirmed) return;
+    await supabase.from("posts").delete().neq("id", "00000000-0000-0000-0000-000000000000");
     loadPosts();
   }
 
@@ -166,7 +179,7 @@ export default function AdminPage() {
   return (
     <main className="max-w-2xl mx-auto px-4 py-10">
       <div className="flex items-center justify-between mb-10">
-        <h1 className="font-display italic text-3xl text-bone">subir foto</h1>
+        <h1 className="font-display italic text-3xl text-bone">panel</h1>
         <button
           onClick={handleLogout}
           className="text-[11px] uppercase tracking-widest2 text-mute hover:text-bone transition-colors"
@@ -175,16 +188,63 @@ export default function AdminPage() {
         </button>
       </div>
 
-      {/* Herramienta: recalcular dimensiones reales */}
-      <div className="border border-accent/40 bg-charcoal p-5 mb-8">
-        <h2 className="text-[11px] uppercase tracking-widest2 text-accent mb-2">
-          Corregir tamaños de fotos
+      {/* Subida masiva */}
+      <form
+        onSubmit={handleBulkUpload}
+        className="border border-line bg-charcoal p-6 mb-8"
+      >
+        <h2 className="text-[11px] uppercase tracking-widest2 text-bone mb-2">
+          Subir varias fotos a la vez
         </h2>
         <p className="text-xs text-mute mb-4 leading-relaxed">
-          Usá esto si subiste fotos manualmente desde Supabase Storage (no
-          desde este formulario) y en la galería se ven recortadas. Lee el
-          tamaño real de cada foto y corrige la base de datos. Se puede
-          correr las veces que quieras, no hace daño.
+          Elegí todas las fotos que quieras (podés seleccionar cientos a la
+          vez desde el explorador de archivos). Cada una se sube con su
+          tamaño real medido automáticamente — no hace falta ningún paso
+          extra después.
+        </p>
+
+        <input
+          type="file"
+          accept="image/*"
+          multiple
+          onChange={handleFilesChange}
+          className="block w-full text-sm text-bone file:mr-4 file:py-2 file:px-4 file:border file:border-line file:bg-ink file:text-bone file:text-xs file:uppercase file:tracking-widest2 mb-4"
+        />
+
+        {files.length > 0 && (
+          <p className="text-xs text-mute mb-4">
+            {files.length} foto{files.length !== 1 ? "s" : ""} seleccionada
+            {files.length !== 1 ? "s" : ""}.
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={bulkUploading || files.length === 0}
+          className="w-full border border-accent text-accent py-2 text-sm uppercase tracking-widest2 hover:bg-accent hover:text-ink transition-colors disabled:opacity-50"
+        >
+          {bulkUploading
+            ? `Subiendo... ${bulkProgress.done}/${bulkProgress.total}`
+            : "Subir fotos seleccionadas"}
+        </button>
+
+        {bulkErrors.length > 0 && (
+          <p className="text-xs text-red-400 mt-3">
+            Fallaron {bulkErrors.length}: {bulkErrors.join(", ")}
+          </p>
+        )}
+      </form>
+
+      {/* Herramienta legacy: recalcular dimensiones de fotos viejas */}
+      <div className="border border-accent/40 bg-charcoal p-5 mb-8">
+        <h2 className="text-[11px] uppercase tracking-widest2 text-accent mb-2">
+          Corregir tamaños (fotos viejas subidas por Storage)
+        </h2>
+        <p className="text-xs text-mute mb-4 leading-relaxed">
+          Solo para fotos que subiste manualmente por Supabase Storage antes
+          de tener la subida masiva de arriba. Si esto no corrige nada, es
+          porque esas fotos quedaron con otro dueño — mejor borralas (abajo)
+          y resubilas con la herramienta de arriba.
         </p>
         <button
           onClick={handleFixDimensions}
@@ -197,61 +257,23 @@ export default function AdminPage() {
         </button>
       </div>
 
-      <form
-        onSubmit={handleUpload}
-        className="border border-line bg-charcoal p-6 mb-12"
-      >
-        <label className="block mb-4">
-          <span className="block text-[11px] uppercase tracking-widest2 text-mute mb-2">
-            Foto
-          </span>
-          <input
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handleFileChange}
-            required
-            className="block w-full text-sm text-bone file:mr-4 file:py-2 file:px-4 file:border file:border-line file:bg-ink file:text-bone file:text-xs file:uppercase file:tracking-widest2"
-          />
-        </label>
+      {message && (
+        <p className="text-center text-xs text-mute mb-8">{message}</p>
+      )}
 
-        {preview && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={preview}
-            alt="Vista previa"
-            className="w-full max-h-80 object-contain mb-4 border border-line"
-          />
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-[11px] uppercase tracking-widest2 text-mute">
+          Publicadas ({posts.length})
+        </h2>
+        {posts.length > 0 && (
+          <button
+            onClick={handleDeleteAll}
+            className="text-[11px] uppercase tracking-widest2 text-red-400 hover:text-red-300"
+          >
+            Borrar todas
+          </button>
         )}
-
-        <label className="block mb-6">
-          <span className="block text-[11px] uppercase tracking-widest2 text-mute mb-2">
-            Descripción (opcional)
-          </span>
-          <input
-            type="text"
-            value={caption}
-            onChange={(e) => setCaption(e.target.value)}
-            className="w-full bg-ink border border-line px-3 py-2 text-bone text-sm focus:outline-none focus:border-accent"
-          />
-        </label>
-
-        <button
-          type="submit"
-          disabled={uploading || !file}
-          className="w-full border border-accent text-accent py-2 text-sm uppercase tracking-widest2 hover:bg-accent hover:text-ink transition-colors disabled:opacity-50"
-        >
-          {uploading ? "Subiendo..." : "Publicar"}
-        </button>
-
-        {message && (
-          <p className="text-center text-xs text-mute mt-4">{message}</p>
-        )}
-      </form>
-
-      <h2 className="text-[11px] uppercase tracking-widest2 text-mute mb-4">
-        Publicadas ({posts.length})
-      </h2>
+      </div>
       <ul className="space-y-2">
         {posts.map((p) => (
           <li
@@ -265,7 +287,7 @@ export default function AdminPage() {
               className="w-14 h-14 object-cover"
             />
             <span className="flex-1 text-xs text-mute truncate">
-              {p.caption || "sin descripción"} · {p.width}×{p.height}
+              {p.width}×{p.height}
             </span>
             <button
               onClick={() => handleDelete(p.id)}
