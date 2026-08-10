@@ -9,9 +9,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 // Margen entre fotos, en píxeles. 1cm ≈ 37.8px a 96dpi.
 const GAP = 19;
 
-// Cantidad de columnas del mosaico (como en Pinterest/masonry).
-// Más columnas = fotos más chicas y más "densas".
-const COLS = 4;
+// Cantidad MÁXIMA de columnas — el mosaico nunca va a tener más
+// columnas que esto, aunque subas miles de fotos.
+const MAX_COLS = 6;
+
+// Mínimo de fotos que quiero, en promedio, por columna, antes de
+// agregar una columna más. Con pocas fotos, esto mantiene las
+// columnas parejas (menos espacios vacíos que rellenar).
+const PHOTOS_PER_COL = 3;
 
 // Ancho de cada columna en píxeles (el alto de cada foto sale solo,
 // de su proporción real — nunca se recorta ninguna imagen).
@@ -102,7 +107,13 @@ export default function PanCanvas({ posts }) {
   const { tiles, periodW, periodH } = useMemo(() => {
     if (!posts || posts.length === 0) return { tiles: [], periodW: 1, periodH: 1 };
     const rng = mulberry32(posts.length * 7919);
-    return columnMasonryLayout(posts, COLS, COL_WIDTH, GAP, rng);
+    // Menos fotos → menos columnas (más parejo). Más fotos → hasta
+    // MAX_COLS. Nunca menos de 2 columnas.
+    const cols = Math.max(
+      2,
+      Math.min(MAX_COLS, Math.round(posts.length / PHOTOS_PER_COL))
+    );
+    return columnMasonryLayout(posts, cols, COL_WIDTH, GAP, rng);
   }, [posts]);
 
   // Medir viewport y recalcular en resize.
