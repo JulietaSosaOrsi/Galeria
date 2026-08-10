@@ -3,20 +3,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 // ============================================================
-// ▼▼▼ ACÁ SE AJUSTAN LOS DOS PARÁMETROS QUE PEDISTE ▼▼▼
+// ▼▼▼ ACÁ SE AJUSTAN LOS PARÁMETROS DEL MOSAICO ▼▼▼
 // ============================================================
 
 // Margen entre fotos, en píxeles. 1cm ≈ 37.8px a 96dpi.
-// 0.5cm ≈ 19px. Subí o bajá este número para más o menos separación.
 const GAP = 19;
 
 // Cantidad de columnas del mosaico (como en Pinterest/masonry).
 // Más columnas = fotos más chicas y más "densas".
-const COLS = 5;
+const COLS = 4;
 
 // Ancho de cada columna en píxeles (el alto de cada foto sale solo,
 // de su proporción real — nunca se recorta ninguna imagen).
-const COL_WIDTH = 340;
+// Achicado de 340 a 220 para fotos más pequeñas.
+const COL_WIDTH = 220;
 
 // ============================================================
 
@@ -31,34 +31,52 @@ function mulberry32(seed) {
   };
 }
 
+function placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef) {
+  let col = 0;
+  for (let c = 1; c < cols; c++) {
+    if (colHeights[c] < colHeights[col]) col = c;
+  }
+  const aspect = item.width && item.height ? item.width / item.height : 0.8;
+  const h = colWidth / aspect;
+  const x = gap / 2 + col * (colWidth + gap);
+  const y = gap / 2 + colHeights[col];
+
+  tiles.push({ key: tileIndexRef.i++, item, x, y, w: colWidth, h });
+  colHeights[col] += h + gap;
+}
+
 // Masonry real por columnas: cada foto conserva su proporción
 // original (nunca se recorta). El "período" resultante es siempre
-// un rectángulo exacto (PERIOD_W × PERIOD_H calculado), por eso
-// sigue repitiendo sin costuras al hacer wraparound.
+// un rectángulo exacto, por eso repite sin costuras al hacer wraparound.
+//
+// A diferencia de un masonry normal, ACÁ NO se deja que una columna
+// quede más corta que las demás (eso dejaba espacios negros): una vez
+// que todas las fotos entraron una vez, se sigue rellenando la columna
+// más corta repitiendo fotos del mismo set hasta que todas las
+// columnas terminan a una altura pareja.
 function columnMasonryLayout(items, cols, colWidth, gap, rng) {
-  // Orden aleatorio (pero determinístico) para que el mosaico no
-  // quede siempre con las mismas fotos arriba.
   const shuffled = [...items].sort(() => rng() - 0.5);
-
   const colHeights = new Array(cols).fill(0);
   const tiles = [];
+  const tileIndexRef = { i: 0 };
 
+  // Pasada 1: cada foto entra una vez.
   for (const item of shuffled) {
-    // La foto va a la columna más corta hasta ahora (masonry clásico).
-    let col = 0;
-    for (let c = 1; c < cols; c++) {
-      if (colHeights[c] < colHeights[col]) col = c;
-    }
+    placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef);
+  }
 
-    const aspect =
-      item.width && item.height ? item.width / item.height : 0.8; // fallback 4:5
-    const h = colWidth / aspect;
-    const x = gap / 2 + col * (colWidth + gap);
-    const y = gap / 2 + colHeights[col];
+  // Meta de altura: la columna más alta después de la pasada 1.
+  const targetHeight = Math.max(...colHeights);
 
-    tiles.push({ item, x, y, w: colWidth, h });
-
-    colHeights[col] += h + gap;
+  // Pasada 2: rellenar columnas cortas repitiendo fotos, hasta que
+  // todas se acerquen a la meta (sin espacios negros al final).
+  let cursor = 0;
+  let safety = 0;
+  while (Math.min(...colHeights) < targetHeight - gap && safety < shuffled.length * 8) {
+    const item = shuffled[cursor % shuffled.length];
+    cursor++;
+    safety++;
+    placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef);
   }
 
   const periodW = cols * (colWidth + gap);
@@ -205,9 +223,9 @@ export default function PanCanvas({ posts }) {
                 height: periodH,
               }}
             >
-              {tiles.map(({ item, x, y, w, h }) => (
+              {tiles.map(({ key, item, x, y, w, h }) => (
                 <div
-                  key={`${offX}-${offY}-${item.id}`}
+                  key={`${offX}-${offY}-${key}`}
                   className="absolute overflow-hidden bg-charcoal"
                   style={{ left: x, top: y, width: w, height: h }}
                   onClick={() => handleTileClick(item)}
