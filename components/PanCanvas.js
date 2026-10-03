@@ -23,6 +23,13 @@ const PHOTOS_PER_COL = 3;
 // Achicado de 340 a 220 para fotos más pequeñas.
 const COL_WIDTH = 220;
 
+// Fotos apiladas (en promedio) por columna dentro de un "período".
+// MÁS ALTO = columnas más largas = las separaciones sobrantes se
+// reparten en muchos gaps chiquitos → mosaico compacto tipo VSCO,
+// sin baches. (Contra: las fotos se repiten un poco más seguido.)
+// MÁS BAJO = menos repetición, pero separaciones más grandes.
+const STACK_PER_COL = 14;
+
 // ============================================================
 
 // PRNG determinístico simple (mismo orden de fotos en cada carga).
@@ -36,57 +43,67 @@ function mulberry32(seed) {
   };
 }
 
-function placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef) {
-  let col = 0;
-  for (let c = 1; c < cols; c++) {
-    if (colHeights[c] < colHeights[col]) col = c;
-  }
-  const aspect = item.width && item.height ? item.width / item.height : 0.8;
-  const h = colWidth / aspect;
-  const x = gap / 2 + col * (colWidth + gap);
-  const y = gap / 2 + colHeights[col];
-
-  tiles.push({ key: tileIndexRef.i++, item, x, y, w: colWidth, h });
-  colHeights[col] += h + gap;
-}
-
-// Masonry real por columnas: cada foto conserva su proporción
-// original (nunca se recorta). El "período" resultante es siempre
-// un rectángulo exacto, por eso repite sin costuras al hacer wraparound.
+// Masonry por columnas para un lienzo infinito, SIN baches y SIN
+// recortar ninguna foto. Idea:
 //
-// A diferencia de un masonry normal, ACÁ NO se deja que una columna
-// quede más corta que las demás (eso dejaba espacios negros): una vez
-// que todas las fotos entraron una vez, se sigue rellenando la columna
-// más corta repitiendo fotos del mismo set hasta que todas las
-// columnas terminan a una altura pareja.
+//  - El "período" (el rectángulo que se repite) tiene una altura fija
+//    y ALTA: cada columna apila MUCHAS fotos (STACK_PER_COL).
+//  - Cada columna se llena hasta casi esa altura y el poquito que
+//    sobra se reparte por igual entre TODAS sus separaciones.
+//
+// Al haber muchas fotos por columna, ese sobrante se diluye en gaps
+// chiquititos y parejos (mosaico compacto), en vez de juntarse en un
+// hueco grande. Y como cada columna mide EXACTO lo mismo, el bloque
+// repite sin costuras en todas las direcciones.
 function columnMasonryLayout(items, cols, colWidth, gap, rng) {
-  const shuffled = [...items].sort(() => rng() - 0.5);
-  const colHeights = new Array(cols).fill(0);
+  const aspectH = (item) => {
+    const aspect = item.width && item.height ? item.width / item.height : 0.8;
+    return colWidth / aspect;
+  };
+
+  const heights = items.map(aspectH);
+  const avgH = heights.reduce((s, h) => s + h, 0) / heights.length;
+
+  // Altura fija del período: STACK_PER_COL fotos de alto promedio.
+  const periodH = (avgH + gap) * STACK_PER_COL;
+
   const tiles = [];
-  const tileIndexRef = { i: 0 };
+  let key = 0;
 
-  // Pasada 1: cada foto entra una vez.
-  for (const item of shuffled) {
-    placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef);
-  }
+  for (let c = 0; c < cols; c++) {
+    const x = gap / 2 + c * (colWidth + gap);
 
-  // Meta de altura: la columna más alta después de la pasada 1.
-  const targetHeight = Math.max(...colHeights);
+    // Orden propio de la columna (para que no queden todas iguales).
+    const order = [...items].sort(() => rng() - 0.5);
 
-  // Pasada 2: rellenar columnas cortas repitiendo fotos, hasta que
-  // todas se acerquen a la meta (sin espacios negros al final).
-  let cursor = 0;
-  let safety = 0;
-  while (Math.min(...colHeights) < targetHeight - gap && safety < shuffled.length * 8) {
-    const item = shuffled[cursor % shuffled.length];
-    cursor++;
-    safety++;
-    placeInShortestColumn(item, colHeights, cols, colWidth, gap, tiles, tileIndexRef);
+    // Apilar fotos hasta que no entre otra dejando el gap mínimo.
+    const colItems = [];
+    let sumH = 0;
+    let idx = 0;
+    let safety = 0;
+    while (safety++ < items.length * 60) {
+      const item = order[idx % order.length];
+      const h = aspectH(item);
+      const m = colItems.length + 1; // cantidad si agrego esta foto
+      // ¿entra dejando al menos `gap` de separación en todas?
+      if (sumH + h + m * gap > periodH && colItems.length >= 1) break;
+      colItems.push({ item, h });
+      sumH += h;
+      idx++;
+    }
+
+    const n = colItems.length;
+    // Gap uniforme que llena EXACTO el período (siempre >= gap base).
+    const g = n > 0 ? (periodH - sumH) / n : gap;
+
+    let y = 0;
+    for (const { item, h } of colItems) {
+      tiles.push({ key: key++, item, x, y, w: colWidth, h });
+      y += h + g;
+    }
   }
 
   const periodW = cols * (colWidth + gap);
-  const periodH = Math.max(...colHeights) + gap / 2;
-
   return { tiles, periodW, periodH };
 }
 
@@ -102,6 +119,11 @@ export default function PanCanvas({ posts }) {
 
   const [viewport, setViewport] = useState({ w: 1200, h: 800 });
   const [active, setActive] = useState(null);
+  // El lienzo depende del tamaño real de la ventana y de un orden
+  // aleatorio: eso el servidor no lo sabe. Lo dibujamos solo en el
+  // navegador (después de montar) para evitar desajustes de hidratación.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // Layout determinístico: se calcula una sola vez por set de fotos.
   const { tiles, periodW, periodH } = useMemo(() => {
@@ -109,9 +131,9 @@ export default function PanCanvas({ posts }) {
     const rng = mulberry32(posts.length * 7919);
     // Menos fotos → menos columnas (más parejo). Más fotos → hasta
     // MAX_COLS. Nunca menos de 2 columnas.
-    const cols = Math.max(
-      2,
-      Math.min(MAX_COLS, Math.round(posts.length / PHOTOS_PER_COL))
+    const cols = Math.min(
+      posts.length, // nunca más columnas que fotos (evita franjas vacías)
+      Math.max(2, Math.min(MAX_COLS, Math.round(posts.length / PHOTOS_PER_COL)))
     );
     return columnMasonryLayout(posts, cols, COL_WIDTH, GAP, rng);
   }, [posts]);
@@ -166,9 +188,10 @@ export default function PanCanvas({ posts }) {
       velocity.current.y = 0;
     }
     const vp = viewportRef.current;
+    if (!vp) return; // sin fotos, el contenedor no existe: no enganchamos nada
     vp.addEventListener("wheel", onWheel, { passive: false });
     return () => vp.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [tiles.length]);
 
   // Pointer drag (mouse y touch, unificado).
   function onPointerDown(e) {
@@ -223,7 +246,7 @@ export default function PanCanvas({ posts }) {
       onPointerLeave={onPointerUp}
     >
       <div ref={worldRef} className="absolute top-0 left-0 will-change-transform">
-        {copyOffsetsY.map((offY) =>
+        {mounted && copyOffsetsY.map((offY) =>
           copyOffsetsX.map((offX) => (
             <div
               key={`${offX}-${offY}`}
